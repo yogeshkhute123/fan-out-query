@@ -1,0 +1,8 @@
+# Optional extras. Install with:  pip install -r requirements-optional.txt
+
+# Google Ads Keyword Planner (the ONLY source of search volume / CPC / competition).
+google-ads>=25.0
+
+# True semantic embeddings for similarity, de-duplication and clustering.
+# Without it the tool falls back to a hybrid TF-IDF model (works offline, less synonym-aware).
+sentence-transformers>=3.0
