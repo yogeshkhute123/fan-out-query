@@ -108,6 +108,15 @@ class Settings:
     llm_enabled: bool = True
     cache_ttl_days: int = 30
 
+    # --- key-free sources (no API key / account needed) ---
+    free_sources_enabled: bool = True
+    autocomplete_engines: list[str] = field(default_factory=lambda: ["google", "bing", "duckduckgo"])
+    autocomplete_depth: str = "full"  # basic = question/preposition/commercial probes, full = + a-z
+    suggest_delay: float = 1.0
+    wikipedia_enabled: bool = True
+    reddit_public_enabled: bool = True
+    competitor_urls: list[str] = field(default_factory=list)
+
     # --- paths ---
     db_path: Path = field(default_factory=lambda: PROJECT_ROOT / "data" / "fanout.sqlite3")
     output_dir: Path = field(default_factory=lambda: PROJECT_ROOT / "output")
@@ -139,13 +148,18 @@ class Settings:
         return bool(self.reddit_client_id and self.reddit_client_secret)
 
     def provider_status(self) -> dict[str, bool]:
+        free = self.free_sources_enabled
         return {
-            "SERP provider": self.serp_configured,
-            "Google Ads Keyword Planner": self.google_ads_configured,
-            "OpenAI": bool(self.openai_api_key) and self.llm_enabled,
-            "Anthropic": bool(self.anthropic_api_key) and self.llm_enabled,
-            "Perplexity": bool(self.perplexity_api_key) and self.llm_enabled,
-            "Reddit API": self.reddit_configured,
+            "Autocomplete (" + ", ".join(self.autocomplete_engines) + ") – free": free and bool(self.autocomplete_engines),
+            "Wikipedia – free": free and self.wikipedia_enabled,
+            "Reddit public search – free": free and self.reddit_public_enabled and not self.reddit_configured,
+            "Competitor URLs (you supply) – free": bool(self.competitor_urls),
+            "SERP API (optional, paid)": self.serp_configured,
+            "Google Ads Keyword Planner (optional)": self.google_ads_configured,
+            "OpenAI (optional, paid)": bool(self.openai_api_key) and self.llm_enabled,
+            "Anthropic (optional, paid)": bool(self.anthropic_api_key) and self.llm_enabled,
+            "Perplexity (optional, paid)": bool(self.perplexity_api_key) and self.llm_enabled,
+            "Reddit API (optional)": self.reddit_configured,
         }
 
 
@@ -186,6 +200,14 @@ def load_settings(env_file: str | os.PathLike | None = None) -> Settings:
         max_serp_queries=_env_int("MAX_SERP_QUERIES", Settings.max_serp_queries),
         max_competitor_pages=_env_int("MAX_COMPETITOR_PAGES", Settings.max_competitor_pages),
         llm_enabled=_env_bool("LLM_ENABLED", True),
+        free_sources_enabled=_env_bool("FREE_SOURCES_ENABLED", True),
+        autocomplete_engines=[e.strip().lower() for e in (_env("AUTOCOMPLETE_ENGINES", "google,bing,duckduckgo") or "").split(",")
+                              if e.strip()],
+        autocomplete_depth=(_env("AUTOCOMPLETE_DEPTH", "full") or "full").lower(),
+        suggest_delay=_env_float("SUGGEST_DELAY", 1.0),
+        wikipedia_enabled=_env_bool("WIKIPEDIA_ENABLED", True),
+        reddit_public_enabled=_env_bool("REDDIT_PUBLIC_ENABLED", True),
+        competitor_urls=[u.strip() for u in (_env("COMPETITOR_URLS", "") or "").split(",") if u.strip()],
         crawl=crawl,
     )
     if _env("FANOUT_DB_PATH"):

@@ -74,6 +74,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument("--crawl-delay", type=float, help="Seconds between requests to the website (min, robots.txt may raise it)")
     p.add_argument("--no-robots", action="store_true", help="Do not apply robots.txt rules (only for sites you own)")
     p.add_argument("--no-llm", action="store_true", help="Disable all LLM providers")
+    p.add_argument("--competitors", help="Comma-separated competitor page URLs to analyse (works without any API)")
+    p.add_argument("--no-free-sources", action="store_true",
+                   help="Do not use the key-free sources (autocomplete, Wikipedia, Reddit public search)")
+    p.add_argument("--autocomplete-depth", choices=["basic", "full"],
+                   help="basic = question/preposition/commercial probes; full = also seed + a..z (default)")
+    p.add_argument("--engines", help="Autocomplete engines, comma-separated: google,bing,duckduckgo")
     p.add_argument("--output-dir", help="Directory for output files (default ./output)")
     p.add_argument("--non-interactive", action="store_true", help="Fail instead of prompting for missing input")
     p.add_argument("-v", "--verbose", action="store_true", help="Show INFO logs on the console")
@@ -94,6 +100,12 @@ def main(argv: list[str] | None = None) -> int:
         settings.llm_enabled = False
     if args.output_dir:
         settings.output_dir = Path(args.output_dir)
+    if args.no_free_sources:
+        settings.free_sources_enabled = False
+    if args.autocomplete_depth:
+        settings.autocomplete_depth = args.autocomplete_depth
+    if args.engines:
+        settings.autocomplete_engines = [e.strip().lower() for e in args.engines.split(",") if e.strip()]
     log = setup_logging(settings.log_dir, args.verbose)
 
     print("=" * 64)
@@ -115,10 +127,14 @@ def main(argv: list[str] | None = None) -> int:
         country = args.country if args.country is not None else _ask("Country", "")
         language = args.language or _ask("Language", "English")
         num = _ask_int("Number of queries", 100, args.num)
+        if args.competitors is None and not settings.competitor_urls:
+            args.competitors = _ask("Competitor URLs, comma-separated (optional, Enter to skip)", "")
+    if args.competitors:
+        settings.competitor_urls = [u.strip() for u in args.competitors.split(",") if u.strip()]
 
-    print("\nProviders:")
+    print("\nData sources:")
     for name, ok in settings.provider_status().items():
-        print(f"  {'✓' if ok else '–'} {name}{'' if ok else ' (not configured – skipped)'}")
+        print(f"  {'✓' if ok else '–'} {name}{'' if ok else ' (off / not configured – skipped)'}")
     print()
 
     started = time.time()

@@ -29,22 +29,21 @@ GAP_VALUE = {
     Coverage.CANNIBALIZATION_RISK: 0.45,
     Coverage.EXISTING_PAGE: 0.35,
 }
-ORIGIN_WEIGHT = {"template": 0.25, "llm": 0.5}
-SERP_ORIGINS = {"google", "paa", "related", "autocomplete"}
+ORIGIN_WEIGHT = {"template": 0.25, "llm": 0.5, "wikipedia": 0.5}
+SERP_ORIGINS = {"google", "paa", "related", "autocomplete", "bing_suggest", "ddg_suggest"}
 MONEY_TYPES = {PageType.PRODUCT, PageType.CATEGORY, PageType.COLLECTION, PageType.SERVICE, PageType.LOCATION, PageType.LANDING}
 
 
 def compute_serp_evidence(cands: list[QueryCandidate], serp: SerpResearch, model: SemanticModel) -> None:
-    if not serp.available:
-        for c in cands:
-            c.serp_evidence = 1.0 if c.origins & SERP_ORIGINS else 0.0
-        return
     corpus = (
         [r.title for s in serp.serps for r in s.organic]
         + [e["question"] for e in serp.paa.values()]
         + list(serp.related)
+        + [m["text"] for m in serp.suggest_meta.values()]
     )
     if not corpus:
+        for c in cands:
+            c.serp_evidence = 1.0 if c.origins & SERP_ORIGINS else 0.0
         return
     sim = SemanticModel.cosine_matrix(model.encode([c.query for c in cands]), model.encode(corpus))
     best = sim.max(axis=1)
@@ -96,9 +95,13 @@ def score_candidates(cands: list[QueryCandidate]) -> None:
             components["content_gap"] = 0.35
         if c.metrics and c.metrics.search_volume is not None and max_log > 0:
             components["search_volume"] = math.log10(c.metrics.search_volume + 1) / max_log
-        # Unknown volume is EXCLUDED (weights re-normalised) – never imputed.
-        total_w = sum(WEIGHTS[k] for k in components)
-        score = sum(WEIGHTS[k] * v for k, v in components.items()) / total_w
+        elif c.demand_proxy is not None:
+            # No real volume: use the clearly-labelled ESTIMATED autocomplete demand signal instead.
+            components["search_demand_proxy"] = c.demand_proxy
+        # Unknown demand is EXCLUDED (weights re-normalised) – never imputed.
+        weight = lambda k: WEIGHTS["search_volume"] if k == "search_demand_proxy" else WEIGHTS[k]  # noqa: E731
+        total_w = sum(weight(k) for k in components)
+        score = sum(weight(k) * v for k, v in components.items()) / total_w
         c.score = round(100 * score, 1)
         c.score_breakdown = {k: round(v, 3) for k, v in components.items()}
 

@@ -15,7 +15,8 @@ FINAL_COLUMNS = [
     "coverage_status", "cannibalization_risk", "recommended_action", "recommended_content_type", "recommended_url",
     "content_gap", "fanout_score", "confidence", "reasoning",
 ]
-EXTRA_COLUMNS = ["data_origin_label", "search_volume_source", "user_journey_stage", "origins", "evidence"]
+EXTRA_COLUMNS = ["data_origin_label", "search_volume_source", "demand_signal_estimated", "source_bing_ddg_autocomplete",
+                 "source_wikipedia", "user_journey_stage", "origins", "evidence"]
 
 
 def _yn(flag: bool) -> str:
@@ -63,6 +64,9 @@ def query_row(idx: int, c: QueryCandidate, seed: str) -> dict:
         "reasoning": c.reasoning,
         "data_origin_label": c.label.value,
         "search_volume_source": f"{m.label.value}: {m.note}" if m else "UNAVAILABLE",
+        "demand_signal_estimated": c.demand_proxy,
+        "source_bing_ddg_autocomplete": _yn(bool(o & {"bing_suggest", "ddg_suggest"})),
+        "source_wikipedia": _yn("wikipedia" in o),
         "user_journey_stage": c.user_journey,
         "origins": ", ".join(sorted(o)),
         "evidence": " | ".join(c.evidence[:5]),
@@ -154,15 +158,21 @@ def topic_clusters_df(r: ResearchResult) -> pd.DataFrame:
 
 def search_volume_df(r: ResearchResult) -> pd.DataFrame:
     rows = []
+    meta_all = r.serp.suggest_meta if r.serp else {}
     for c in r.candidates:
         m = c.metrics
+        meta = meta_all.get(c.normalized) or {}
         rows.append({
             "query": c.query, "selected_in_final": _yn(c in r.final), "search_volume": m.search_volume if m else None,
+            "demand_signal_estimated": c.demand_proxy,
+            "autocomplete_engines": ", ".join(sorted(meta.get("engines", []))),
+            "best_autocomplete_rank": meta.get("best_rank"),
             "competition": m.competition if m else None, "competition_index": m.competition_index if m else None,
             "cpc_low (top-of-page bid low)": m.cpc_low if m else None, "cpc_high (top-of-page bid high)": m.cpc_high if m else None,
             "monthly_history": "; ".join(f"{x['year']}-{x['month']}:{x['searches']}" for x in (m.monthly if m else [])[-12:]),
             "data_label": m.label.value if m else "UNAVAILABLE", "source": m.source if m else "unavailable",
-            "note": m.note if m else "",
+            "note": (m.note if m else "") + (" | demand_signal is ESTIMATED from autocomplete agreement/rank, "
+                                             "not a search volume" if c.demand_proxy is not None else ""),
         })
     return pd.DataFrame(rows)
 
@@ -184,9 +194,17 @@ def serp_df(r: ResearchResult) -> pd.DataFrame:
                 rows.append({"query": s.query, "type": "related_search", "position": None, "url": None, "title": rel,
                              "snippet": None, "provider": s.provider})
         for base, sugg in r.serp.autocomplete.items():
-            for sug in sugg:
-                rows.append({"query": base, "type": "autocomplete", "position": None, "url": None, "title": sug,
-                             "snippet": None, "provider": r.serp.provider})
+            engine, _, probe = base.partition(": ")
+            for rank, sug in enumerate(sugg, start=1):
+                rows.append({"query": probe or base, "type": "autocomplete", "position": rank, "url": None, "title": sug,
+                             "snippet": None, "provider": engine if probe else r.serp.provider})
+        if r.serp.wikipedia.get("title"):
+            for sec in r.serp.wikipedia.get("sections", []):
+                rows.append({"query": r.serp.wikipedia["title"], "type": "wikipedia_section", "position": None,
+                             "url": None, "title": sec, "snippet": None, "provider": "wikipedia"})
+            for rel in r.serp.wikipedia.get("related", []):
+                rows.append({"query": r.serp.wikipedia["title"], "type": "wikipedia_related_article", "position": None,
+                             "url": None, "title": rel, "snippet": None, "provider": "wikipedia"})
     if not rows:
         rows.append({"query": None, "type": "NO DATA", "position": None, "url": None,
                      "title": (r.serp.note if r.serp else "SERP research not run"), "snippet": None, "provider": None})

@@ -43,6 +43,7 @@ def settings(tmp_path) -> Settings:
     s.crawl.timeout = 5.0
     s.use_sentence_transformers = False
     s.llm_enabled = False
+    s.free_sources_enabled = False  # the internet is not used in tests; see test_free_sources.py
     return s
 
 

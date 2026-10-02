@@ -31,6 +31,8 @@ from .providers.google_ads import GoogleAdsKeywordPlanner
 from .providers.llm import LLMProvider
 from .providers.openai import OpenAIProvider
 from .providers.perplexity import PerplexityProvider
+from .providers.free_sources import AutocompleteEngine, RedditPublicSource, WikipediaSource
+from .providers.locale import language_info
 from .providers.reddit import RedditProvider
 from .providers.serp import BaseSerpProvider, get_serp_provider
 from .queries.coverage import assess_coverage
@@ -46,6 +48,7 @@ from .research.competitors import run_competitor_research
 from .research.keyword_metrics import attach_keyword_metrics
 from .research.llm_research import run_llm_research
 from .research.paa import expand_paa
+from .research.free_research import demand_proxy, run_autocomplete_research, run_wikipedia_research
 from .research.serp_research import run_serp_research
 from .results import ResearchResult
 
@@ -95,13 +98,14 @@ class ResearchPipeline:
         self.progress = progress or _noop
         self.db = Database(settings.db_path)
         self.notes: list[str] = []
+        self.skipped_apis: list[str] = []
 
     # ------------------------------------------------------------ providers
     def _init_serp(self) -> BaseSerpProvider | None:
         try:
             return get_serp_provider(self.settings, self.db)
         except ProviderError as exc:
-            self.notes.append(f"SERP research skipped: {exc}")
+            self.skipped_apis.append("SERP API")
             log.info("SERP provider unavailable: %s", exc)
             return None
 
@@ -111,31 +115,50 @@ class ResearchPipeline:
             self.notes.append("LLM providers disabled (LLM_ENABLED=false)")
             return providers
         s = self.settings
-        for factory in (
-            lambda: AnthropicProvider(s.anthropic_api_key, s.anthropic_model, self.db),
-            lambda: OpenAIProvider(s.openai_api_key, s.openai_model, self.db),
-            lambda: PerplexityProvider(s.perplexity_api_key, s.perplexity_model, self.db),
+        for label, factory in (
+            ("Anthropic", lambda: AnthropicProvider(s.anthropic_api_key, s.anthropic_model, self.db)),
+            ("OpenAI", lambda: OpenAIProvider(s.openai_api_key, s.openai_model, self.db)),
+            ("Perplexity", lambda: PerplexityProvider(s.perplexity_api_key, s.perplexity_model, self.db)),
         ):
             try:
                 providers.append(factory())
             except ProviderError as exc:
                 log.info("LLM provider skipped: %s", exc)
-                self.notes.append(f"LLM provider skipped: {exc}")
+                self.skipped_apis.append(label)
         return providers
 
-    def _init_reddit(self) -> RedditProvider | None:
+    def _init_reddit(self) -> RedditProvider | RedditPublicSource | None:
+        s = self.settings
         try:
-            return RedditProvider(self.settings, self.db)
+            return RedditProvider(s, self.db)
         except ProviderError as exc:
-            self.notes.append(f"Reddit API skipped: {exc}")
-            return None
+            log.info("Reddit API unavailable: %s", exc)
+        if s.free_sources_enabled and s.reddit_public_enabled:
+            return RedditPublicSource(self.db, s.crawl.user_agent)
+        self.skipped_apis.append("Reddit API")
+        return None
+
+    def _init_free_sources(self, language: str) -> tuple[list[AutocompleteEngine], WikipediaSource | None]:
+        s = self.settings
+        if not s.free_sources_enabled:
+            self.notes.append("Key-free sources disabled (FREE_SOURCES_ENABLED=false / --no-free-sources)")
+            return [], None
+        engines = []
+        for name in s.autocomplete_engines:
+            try:
+                engines.append(AutocompleteEngine(name, self.db, s.crawl.user_agent, s.suggest_delay))
+            except ValueError as exc:
+                self.notes.append(str(exc))
+        wiki = WikipediaSource(self.db, s.crawl.user_agent, language_info(language)[0]) if s.wikipedia_enabled else None
+        return engines, wiki
 
     def _init_ads(self) -> tuple[GoogleAdsKeywordPlanner | None, str]:
         try:
             return GoogleAdsKeywordPlanner(self.settings, self.db), ""
         except ProviderError as exc:
             reason = f"Google Ads Keyword Planner unavailable: {exc}"
-            self.notes.append(reason + " – search_volume left null (never estimated).")
+            log.info(reason)
+            self.skipped_apis.append("Google Ads Keyword Planner")
             return None, reason
 
     # ---------------------------------------------------------------- crawl
@@ -215,15 +238,29 @@ class ResearchPipeline:
         )
 
         # [4] SERP
-        self.progress(4, "Researching Google SERPs")
+        self.progress(4, "Researching Google SERPs & autocomplete")
         serp_provider = self._init_serp()
         r.serp = run_serp_research(serp_provider, self.db, r.run_id, seed, inp.country, inp.language,
                                    s.max_serp_queries, s.serp_results_per_query)
-        if r.serp.note:
+        if serp_provider is not None and r.serp.note:
             self.notes.append(r.serp.note)
+        # Key-free: autocomplete expansion (Google/Bing/DuckDuckGo suggestions) + Wikipedia subtopics
+        engines, wiki = self._init_free_sources(inp.language)
+        free_stats = run_autocomplete_research(r.serp, engines, seed, inp.country, inp.language, s.autocomplete_depth)
+        run_wikipedia_research(r.serp, wiki, parent_topic_for(seed), free_stats)
+        r.stats["free_sources"] = {
+            "autocomplete_probes": free_stats.probes, "autocomplete_suggestions": free_stats.suggestions,
+            "engines_used": free_stats.engines_used, "engines_failed": free_stats.engines_failed,
+            "wikipedia_article": free_stats.wikipedia_title, "wikipedia_sections": free_stats.wikipedia_sections,
+            "requests": free_stats.calls,
+        }
+        if engines and not free_stats.engines_used:
+            self.notes.append("Autocomplete endpoints returned nothing (offline, blocked or rate-limited) – see log.")
+        elif free_stats.engines_failed:
+            self.notes.append("Autocomplete engines without data: " + ", ".join(free_stats.engines_failed))
 
         # [5] PAA
-        self.progress(5, "Researching PAA")
+        self.progress(5, "Researching PAA & question queries")
         expand_paa(serp_provider, r.serp, self.db, r.run_id, inp.country, inp.language)
 
         # [6] Community
@@ -237,7 +274,8 @@ class ResearchPipeline:
         # [7] Competitors
         self.progress(7, "Researching competitor content")
         r.competitors = run_competitor_research(r.serp, urlsplit(inp.base_url).netloc, r.inventory, model, self.db, r.run_id,
-                                                s.crawl.user_agent, s.max_competitor_pages, s.crawl.timeout)
+                                                s.crawl.user_agent, s.max_competitor_pages, s.crawl.timeout,
+                                                manual_urls=s.competitor_urls)
         if r.competitors.note:
             self.notes.append(r.competitors.note)
 
@@ -272,6 +310,10 @@ class ResearchPipeline:
         r.metrics = attach_keyword_metrics(kept, planner, inp.country or "", inp.language or "English", reason)
         r.stats["keyword_metrics"] = {"available": r.metrics.available, "with_volume": r.metrics.with_volume,
                                       "requested": r.metrics.requested}
+        n_engines = len(free_stats.engines_used)
+        for c in kept:
+            c.demand_proxy = demand_proxy(r.serp.suggest_meta.get(c.normalized), n_engines)
+        r.stats["keyword_metrics"]["with_estimated_demand_signal"] = sum(1 for c in kept if c.demand_proxy is not None)
 
         # [10] Score, cluster, select, recommend, export
         self.progress(10, "Selecting final opportunities")
@@ -289,9 +331,14 @@ class ResearchPipeline:
         r.candidates = kept + rejected
         r.rejected = rejected
         r.topic_map = build_topic_map(kept, r.pairs)
+        if self.skipped_apis:
+            self.notes.insert(0, "Optional paid APIs not configured (skipped, nothing simulated): "
+                              + ", ".join(dict.fromkeys(self.skipped_apis))
+                              + ". search_volume stays empty; the score uses the ESTIMATED autocomplete demand signal instead.")
         r.data_notes = list(dict.fromkeys(self.notes))
         r.stats["content_gaps_identified"] = sum(1 for c in kept if c.coverage == Coverage.CONTENT_GAP)
         r.stats["api_calls"] = {
+            **{f"free_{k}": v for k, v in free_stats.calls.items()},
             "serp": serp_provider.calls if serp_provider else 0,
             "reddit": reddit.calls if reddit else 0,
             "google_ads": planner.calls if planner else 0,

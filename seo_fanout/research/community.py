@@ -17,6 +17,7 @@ from ..db import Database
 from ..logging_setup import get_logger
 from ..models import CommunityItem, CommunityQuestion
 from ..providers.locale import country_info, language_info
+from ..providers.free_sources import RedditPublicSource
 from ..providers.reddit import RedditProvider
 from ..providers.serp import BaseSerpProvider
 from ..textutil import clean_text, extract_question_sentences, is_question, key_phrases, normalize_query, stem_tokens
@@ -116,7 +117,8 @@ def _merge(questions: list[tuple[str, str, str]], seed_stems: set[str]) -> list[
 
 def run_community_research(
     seed: str, country: str, language: str, db: Database, run_id: str,
-    reddit: RedditProvider | None, serp: BaseSerpProvider | None, max_threads_with_comments: int = 6,
+    reddit: RedditProvider | RedditPublicSource | None, serp: BaseSerpProvider | None,
+    max_threads_with_comments: int = 6,
 ) -> CommunityResearch:
     research = CommunityResearch(available=False)
     notes = []
@@ -138,12 +140,15 @@ def run_community_research(
                     collected.append((q, "reddit", item.thread_url))
                 texts.append(item.title + " " + item.text + " " + " ".join(comments))
             research.items += unique
-            research.sources_used.append("reddit_api")
+            if unique:
+                research.sources_used.append(getattr(reddit, "name", "reddit_api"))
+            else:
+                notes.append("Reddit returned no results (blocked, rate-limited or no matching threads)")
         except Exception as exc:
             notes.append(f"Reddit API failed: {exc}")
             log.warning("Reddit research failed: %s", exc)
     else:
-        notes.append("Reddit API not configured")
+        notes.append("Reddit not available (no API credentials and public search disabled)")
 
     # 2. Quora / Reddit / forums discovered through the SERP API (site: operators)
     if serp is not None:

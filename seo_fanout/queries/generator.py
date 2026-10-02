@@ -24,7 +24,9 @@ from ..textutil import STOPWORDS, clean_text, content_tokens, normalize_query, s
 
 log = get_logger("generator")
 
-REAL_ORIGINS = {"google", "paa", "autocomplete", "related", "reddit", "quora", "forums", "competitors"}
+REAL_ORIGINS = {"google", "paa", "autocomplete", "bing_suggest", "ddg_suggest", "related", "reddit", "quora",
+                "forums", "competitors"}
+ENGINE_ORIGIN = {"google": "autocomplete", "bing": "bing_suggest", "duckduckgo": "ddg_suggest"}
 
 
 @dataclass
@@ -233,8 +235,22 @@ def generate_candidates(
     for rel, count in serp.related.items():
         pool.add(rel, "related", f"Related search (seen {count}x)", "serp")
     for base, suggestions in serp.autocomplete.items():
-        for sug in suggestions:
-            pool.add(sug, "autocomplete", f"Autocomplete for '{base}'", "serp")
+        engine, _, probe = base.partition(": ")
+        origin = ENGINE_ORIGIN.get(engine) if probe else "autocomplete"
+        if origin is None:
+            origin, probe = "autocomplete", base
+        for rank, sug in enumerate(suggestions, start=1):
+            pool.add(sug, origin, f"{engine if probe != base else 'google'} autocomplete #{rank} for '{probe}'", "autocomplete")
+
+    # Wikipedia subtopics of the head topic (observed topic structure, not observed queries)
+    if serp.wikipedia.get("sections"):
+        head = parts.head
+        for section in serp.wikipedia["sections"][:20]:
+            sec = normalize_query(section)
+            if 2 < len(sec) < 60 and sec not in normalize_query(head):
+                # The subtopic is observed; the query wording is constructed -> template-level provenance.
+                pool.add(f"{head} {sec}", "wikipedia", f"Wikipedia section of '{serp.wikipedia['title']}'", "wikipedia",
+                         label=DataLabel.TEMPLATE)
     # Only the seed itself is taken from the researched patterns: the patterns ("how to <seed>",
     # "why <seed>") are probes for SERP features, not necessarily queries people type.
     for s in serp.serps:

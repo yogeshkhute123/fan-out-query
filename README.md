@@ -19,6 +19,7 @@ You provide a **seed keyword** and a **website**. The tool answers:
 
 ## Contents
 
+- [Quick start – no API keys needed](#quick-start--no-api-keys-needed)
 - [How it works](#how-it-works)
 - [Installation](#installation)
 - [Configuration (environment variables)](#configuration-environment-variables)
@@ -35,6 +36,45 @@ You provide a **seed keyword** and a **website**. The tool answers:
 - [Limitations](#limitations)
 
 ---
+
+## Quick start – no API keys needed
+
+The tool runs fully **without any API key or account**:
+
+```bash
+pip install -r requirements.txt
+python main.py
+```
+
+| Free source (no key) | What it provides |
+|---|---|
+| Your website (crawler) | inventory, cannibalization, coverage, URL structure, internal links |
+| Google / Bing / DuckDuckGo **autocomplete** | real queries people search, expanded with question words (what/why/how/can…), prepositions (for/with/without/vs…), commercial modifiers (best/price/buy…) and A–Z |
+| **Wikipedia** (MediaWiki API) | subtopics and related entities of the topic |
+| **Reddit public search** | real user questions and wording (best effort – Reddit may rate-limit anonymous access) |
+| **Competitor URLs you supply** (`--competitors`) | competitor headings, FAQs, questions, statistics → gap analysis |
+
+```bash
+python main.py --seed "sunscreen for oily skin" --domain example.com --country India \
+               --competitors "https://competitor1.com/oily-skin-sunscreen,https://competitor2.com/guide" \
+               --non-interactive
+```
+
+What changes without paid APIs:
+
+- **`search_volume`, `competition`, `cpc_*` stay empty** – real volume only exists in Google Ads. Instead every
+  query seen in autocomplete gets `demand_signal_estimated` (0–1): agreement between the three engines (60 %) and
+  how high it is suggested (40 %). It is clearly labelled **ESTIMATED**, is *not* a search volume, and is used in
+  the score in place of volume.
+- People Also Ask, ranking URLs and automatic competitor discovery need a SERP API; question-word autocomplete
+  probes cover much of the same question space, and you can name competitors yourself.
+- No LLM ideas – the template patterns plus the free sources produce the candidates.
+
+A full free run sends about 60 small requests per autocomplete engine (`AUTOCOMPLETE_DEPTH=full`, engines run in
+parallel, 1 s apart per engine), a few Wikipedia requests and 3 Reddit searches – everything is cached for 14 days.
+Use `--autocomplete-depth basic` for 34 per engine, `--engines google,bing` to limit engines, or
+`--no-free-sources` to switch them off. These are the public suggestion endpoints browsers use; they are not
+contractual APIs, so they can change or throttle – the tool then skips the engine and tells you.
 
 ## How it works
 
@@ -112,6 +152,8 @@ Credentials are never hard-coded and are redacted from logs.
 | `PERPLEXITY_API_KEY`, `PERPLEXITY_MODEL` | Perplexity provider (default `sonar`) | no |
 | `LLM_ENABLED` | `false` disables all LLM calls | no |
 | `REDDIT_CLIENT_ID`, `REDDIT_CLIENT_SECRET`, `REDDIT_USER_AGENT` | Reddit official API | no |
+| `FREE_SOURCES_ENABLED`, `AUTOCOMPLETE_ENGINES`, `AUTOCOMPLETE_DEPTH`, `SUGGEST_DELAY`, `WIKIPEDIA_ENABLED`, `REDDIT_PUBLIC_ENABLED` | key-free sources (on by default) | no |
+| `COMPETITOR_URLS` | comma-separated competitor pages to analyse (same as `--competitors`) | no |
 | `CRAWL_DELAY`, `CRAWL_MAX_PAGES`, `CRAWL_TIMEOUT`, `CRAWL_MAX_RETRIES`, `CRAWL_USER_AGENT`, `CRAWL_RESPECT_ROBOTS` | crawler behaviour | no |
 | `MAX_SERP_QUERIES`, `MAX_COMPETITOR_PAGES` | research budget | no |
 | `USE_SENTENCE_TRANSFORMERS`, `EMBEDDING_MODEL` | similarity backend | no |
@@ -218,6 +260,10 @@ Useful flags:
 | `--max-pages 500` | crawl budget |
 | `--crawl-delay 2` | seconds between requests (robots.txt `Crawl-delay` is honoured if larger) |
 | `--no-llm` | disable all LLM providers |
+| `--competitors URL1,URL2` | competitor pages to analyse (no API needed) |
+| `--autocomplete-depth basic\|full` | autocomplete expansion size (default `full`) |
+| `--engines google,bing,duckduckgo` | autocomplete engines to use |
+| `--no-free-sources` | disable autocomplete / Wikipedia / Reddit public search |
 | `--no-robots` | ignore robots.txt (**only for sites you own**) |
 | `--output-dir reports/` | output location |
 | `-v` | show INFO logs on the console |
@@ -279,7 +325,8 @@ source_frequency, serp_evidence, source_google, source_paa, source_reddit, sourc
 source_llm, existing_page, existing_page_url, coverage_status, cannibalization_risk, recommended_action,
 recommended_content_type, recommended_url, content_gap, fanout_score, confidence, reasoning`
 
-plus transparency columns: `data_origin_label, search_volume_source, user_journey_stage, origins, evidence`.
+plus transparency columns: `data_origin_label, search_volume_source, demand_signal_estimated,
+source_bing_ddg_autocomplete, source_wikipedia, user_journey_stage, origins, evidence`.
 
 ---
 
@@ -315,10 +362,10 @@ Data is always labelled:
 
 | Label | Meaning |
 |---|---|
-| `REAL_DATA` | crawled pages, SERP API results, Reddit API threads, fetched competitor pages, Google Ads metrics |
-| `ESTIMATED_DATA` | computed heuristics: similarity, intent, coverage, scores |
+| `REAL_DATA` | crawled pages, autocomplete suggestions, SERP API results, Reddit threads, fetched competitor pages, Google Ads metrics |
+| `ESTIMATED_DATA` | computed heuristics: similarity, intent, coverage, scores, `demand_signal_estimated` |
 | `LLM_GENERATED` | AI-search questions and LLM fan-out ideas (hypotheses, not facts) |
-| `TEMPLATE_GENERATED` | rule-based fan-out patterns (lowest confidence) |
+| `TEMPLATE_GENERATED` | rule-based fan-out patterns and Wikipedia-subtopic queries (lowest confidence) |
 
 If a source is unavailable the related columns are `null`/`NO` and the summary explains why. Forum content is used
 for *user language and needs*, never as factual evidence. `confidence` is HIGH only with ≥ 2 independent real
@@ -335,7 +382,9 @@ sources (or a real source plus real volume).
 | SERP APIs / OpenAI / Perplexity | `tenacity` retries on 429/5xx/network errors with exponential back-off + jitter (4 attempts) |
 | Anthropic | official SDK retries (4) with exponential back-off on 429/5xx/connection errors |
 | Google Ads | batches of 500 keywords, `RESOURCE_EXHAUSTED` → exponential back-off (5 s, 10 s, 20 s…) |
-| Reddit | ≥ 1 s between calls (well under 100 requests/min) |
+| Reddit | API: ≥ 1 s between calls; public search: ≥ 2 s, titles/posts only |
+| Autocomplete (free) | one thread per engine, `SUGGEST_DELAY` (1 s) between calls, back-off on 429/5xx, engine skipped after 5 consecutive failures |
+| Wikipedia | 0.5 s between calls |
 
 ---
 
@@ -362,7 +411,8 @@ sources (or a real source plus real volume).
 | `search_volume` empty | Google Ads not configured, developer token lacks Basic access, wrong customer ID, or no data for the keyword – see *Data notes* in `research_summary.md` |
 | `Google Ads auth error` | refresh token generated for another OAuth client, or missing `GOOGLE_ADS_LOGIN_CUSTOMER_ID` for MCC access |
 | SERP columns empty | `SERP_API_KEY` / `SERPER_API_KEY` missing or quota exhausted (HTTP 401/429 in the log) |
-| Fewer than 100 final queries | intended when evidence is thin; add a SERP provider and an LLM key to widen the candidate pool |
+| Fewer than 100 final queries | intended when evidence is thin; keep `AUTOCOMPLETE_DEPTH=full`, add `--competitors`, or add a SERP/LLM key to widen the candidate pool |
+| `Autocomplete endpoints returned nothing` | no internet, a proxy/firewall, or the engine throttled you – wait, raise `SUGGEST_DELAY`, or use `--engines` to pick others |
 | Stale results | `--fresh-crawl` for the site; delete `data/fanout.sqlite3` to clear all caches |
 | `ModuleNotFoundError: google` | `pip install google-ads` |
 
@@ -381,8 +431,8 @@ seo_fanout/
   textutil.py                  normalisation, n-grams, slugs
   crawler/  urls.py robots.py sitemap.py parser.py crawler.py
   analysis/ embeddings.py inventory.py intent.py cannibalization.py topics.py
-  providers/ serp.py google_ads.py openai.py anthropic.py perplexity.py reddit.py llm.py base.py locale.py
-  research/ serp_research.py paa.py community.py competitors.py llm_research.py keyword_metrics.py
+  providers/ free_sources.py serp.py google_ads.py openai.py anthropic.py perplexity.py reddit.py llm.py base.py locale.py
+  research/ free_research.py serp_research.py paa.py community.py competitors.py llm_research.py keyword_metrics.py
   queries/  generator.py dedup.py quality.py coverage.py url_recommender.py internal_links.py scoring.py selection.py
   export/   tables.py excel.py csv_export.py reports.py
   pipeline.py                  10-stage orchestration

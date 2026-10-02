@@ -263,6 +263,7 @@ class QueryCandidate(BaseModel):
     sub_cluster: str = ""
 
     metrics: KeywordMetrics | None = None
+    demand_proxy: float | None = None  # ESTIMATED from autocomplete agreement/rank – never a volume
     score: float = 0.0
     score_breakdown: dict[str, float] = Field(default_factory=dict)
     confidence: str = "LOW"

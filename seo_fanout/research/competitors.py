@@ -198,12 +198,28 @@ def compute_gaps(pages: list[CompetitorPage], inventory: list[PageInventory], mo
 def run_competitor_research(
     serp: SerpResearch, own_domain: str, inventory: list[PageInventory], model: SemanticModel,
     db: Database, run_id: str, user_agent: str, limit: int, timeout: float = 20.0,
+    manual_urls: list[str] | None = None,
 ) -> CompetitorResearch:
-    if not serp.available or not serp.serps:
-        return CompetitorResearch(available=False, note="Competitor analysis needs SERP data (no SERP provider / results).")
-    targets = select_competitor_urls(serp, own_domain, limit)
+    """Analyse competitor pages – URLs you supply (no API needed) plus top SERP results if available."""
+    targets: list[tuple[str, int | None]] = []
+    own = site_key(own_domain)
+    for url in manual_urls or []:
+        url = url.strip()
+        if not url:
+            continue
+        if not url.startswith(("http://", "https://")):
+            url = "https://" + url
+        if site_key(urlsplit(url).netloc) != own and url not in [t[0] for t in targets]:
+            targets.append((url, None))
+    if serp.available and serp.serps:
+        for url, pos in select_competitor_urls(serp, own_domain, limit):
+            if url not in [t[0] for t in targets]:
+                targets.append((url, pos))
+    targets = targets[: max(limit, len(manual_urls or []))]
     if not targets:
-        return CompetitorResearch(available=False, note="No eligible competitor URLs in the SERPs.")
+        return CompetitorResearch(available=False, note=(
+            "No competitor pages analysed: pass competitor URLs with --competitors (no API needed) "
+            "or configure a SERP provider."))
     pos_by_url = dict(targets)
     try:
         fetched = asyncio.run(_fetch_all([u for u, _ in targets], user_agent, timeout))

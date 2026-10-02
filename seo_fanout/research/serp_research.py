@@ -46,6 +46,9 @@ class SerpResearch:
     entities: Counter = field(default_factory=Counter)
     ranking_domains: Counter = field(default_factory=Counter)
     paa: dict[str, dict] = field(default_factory=dict)  # normalized question -> {question, count, source_queries, snippet, link}
+    # Key-free sources: normalized suggestion -> {text, engines:set, best_rank, probes}
+    suggest_meta: dict[str, dict] = field(default_factory=dict)
+    wikipedia: dict = field(default_factory=dict)  # {title, sections, related}
 
     def all_titles(self) -> list[str]:
         return [r.title for s in self.serps for r in s.organic]
